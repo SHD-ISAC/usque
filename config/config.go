@@ -54,23 +54,26 @@ func LoadConfig(configPath string) error {
 	return nil
 }
 
-// SaveConfig writes the current application configuration to a prettified JSON file.
-//
-// Parameters:
-//   - configPath: string - The path to save the configuration JSON file.
-//
-// Returns:
-//   - error: An error if the configuration file cannot be written.
-func (*Config) SaveConfig(configPath string) error {
-	file, err := os.Create(configPath)
+// SaveConfig writes this application configuration to a prettified JSON file.
+// The config contains private key material and access tokens, so newly created
+// files are restricted to the current user.
+func (c *Config) SaveConfig(configPath string) error {
+	if c == nil {
+		return fmt.Errorf("cannot save nil config")
+	}
+
+	file, err := os.OpenFile(configPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return fmt.Errorf("failed to create config file: %v", err)
 	}
 	defer func() { _ = file.Close() }()
+	if err := file.Chmod(0o600); err != nil {
+		return fmt.Errorf("failed to restrict config file permissions: %v", err)
+	}
 
 	encoder := json.NewEncoder(file)
 	encoder.SetIndent("", "  ")
-	if err := encoder.Encode(AppConfig); err != nil {
+	if err := encoder.Encode(c); err != nil {
 		return fmt.Errorf("failed to encode config file: %v", err)
 	}
 
@@ -82,8 +85,11 @@ func (*Config) SaveConfig(configPath string) error {
 // Returns:
 //   - *ecdsa.PrivateKey: The parsed ECDSA private key.
 //   - error: An error if decoding or parsing the private key fails.
-func (*Config) GetEcPrivateKey() (*ecdsa.PrivateKey, error) {
-	privKeyB64, err := base64.StdEncoding.DecodeString(AppConfig.PrivateKey)
+func (c *Config) GetEcPrivateKey() (*ecdsa.PrivateKey, error) {
+	if c == nil {
+		return nil, fmt.Errorf("nil config")
+	}
+	privKeyB64, err := base64.StdEncoding.DecodeString(c.PrivateKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode private key: %v", err)
 	}
@@ -101,8 +107,11 @@ func (*Config) GetEcPrivateKey() (*ecdsa.PrivateKey, error) {
 // Returns:
 //   - *ecdsa.PublicKey: The parsed ECDSA public key.
 //   - error: An error if decoding or parsing the public key fails.
-func (*Config) GetEcEndpointPublicKey() (*ecdsa.PublicKey, error) {
-	endpointPubKeyB64, _ := pem.Decode([]byte(AppConfig.EndpointPubKey))
+func (c *Config) GetEcEndpointPublicKey() (*ecdsa.PublicKey, error) {
+	if c == nil {
+		return nil, fmt.Errorf("nil config")
+	}
+	endpointPubKeyB64, _ := pem.Decode([]byte(c.EndpointPubKey))
 	if endpointPubKeyB64 == nil {
 		return nil, fmt.Errorf("failed to decode endpoint public key")
 	}
