@@ -20,10 +20,15 @@ lifetime of the MASQUE tunnel.
 
 `.github/workflows/build-cachyos.yml` builds the selected `masque-hardening`
 commit for Linux amd64 using the Go version declared in `go.mod` (currently
-1.26.3). It verifies the selected commit and patch ancestry, downloads and
+1.26.10). It verifies the selected commit and patch ancestry, downloads and
 verifies modules, runs tests and vet, and builds with CGO disabled and
 `-trimpath`. Actions are pinned to full commit SHAs and the job has only
 `contents: read` permission. It does not publish a GitHub Release.
+
+Go 1.26.10 includes the `crypto/x509` certificate-trust mitigation for
+[CVE-2026-111943](https://pkg.go.dev/vuln/GO-2026-6809). Existing binaries must
+be rebuilt with the patched toolchain to include this fix. Verify the Go
+version in the artifact's `build-info.txt` before installing it.
 
 Pushes to `masque-hardening` trigger the build. Enable GitHub Actions for this
 fork first if GitHub displays an enable-workflows prompt.
@@ -50,12 +55,15 @@ mkdir -p usque-build
 tar -xzf usque-linux-amd64.tar.gz -C usque-build
 ./usque-build/usque version
 cat source-commit.txt
+head -n 1 build-info.txt
 sudo install -m 0755 usque-build/usque /usr/local/bin/usque
 ```
 
 ## Local configuration
 
-Register and test locally after installing the binary. Do not commit Team JWTs,
+For an existing installation, replace only the binary and keep the original
+local configuration, device registration, and `endpoint_pub_key` unchanged.
+Register locally only when setting up a new installation. Do not commit Team JWTs,
 private keys, access tokens, or real configuration files to this repository.
 Use a private configuration directory (0700) and configuration file (0600),
 retain endpoint public-key pinning, and do not use `--insecure`.
