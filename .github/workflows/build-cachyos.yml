@@ -1,0 +1,96 @@
+name: Build CachyOS (linux-amd64)
+run-name: CachyOS build - ${{ github.ref_name }} - ${{ github.sha }}
+
+on:
+  push:
+    branches: [masque-hardening]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-cachyos-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    if: github.repository == 'SHD-ISAC/usque' && github.ref == 'refs/heads/masque-hardening'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      CGO_ENABLED: "0"
+      GOOS: linux
+      GOARCH: amd64
+      GOAMD64: v1
+      GOTOOLCHAIN: local
+      GOFLAGS: -mod=readonly
+    steps:
+      - name: Checkout selected source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Verify source history
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git merge-base --is-ancestor 6aa03fc97d12848dce34eedbd187fb1077b5d1ea HEAD
+          git merge-base --is-ancestor 7ed785d58151725204be5fbb69f60153ed00315d HEAD
+          git merge-base --is-ancestor 858ec8b7c7f6b38d89bc8b0cb72eaad3eede2b17 HEAD
+
+      - name: Set up Go from go.mod
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          check-latest: false
+          cache: false
+
+      - name: Download and verify modules
+        run: |
+          go mod download
+          go mod verify
+
+      - name: Test
+        run: go test -timeout 5m ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Check dependency files
+        run: git diff --exit-code -- go.mod go.sum
+
+      - name: Build and package
+        run: |
+          mkdir -p dist
+          source_commit=$(git rev-parse HEAD)
+          source_epoch=$(git show -s --format=%ct HEAD)
+          build_date=$(date -u -d "@$source_epoch" '+%Y-%m-%dT%H:%M:%SZ')
+          version="v4.2.1-masque-hardening+${source_commit:0:12}"
+          ldflags="-s -w -X github.com/Diniboy1123/usque/cmd.version=$version -X github.com/Diniboy1123/usque/cmd.commit=$source_commit -X github.com/Diniboy1123/usque/cmd.date=$build_date"
+          go build -trimpath -buildvcs=true -ldflags "$ldflags" -o dist/usque .
+          ./dist/usque version
+          printf '%s\n' "$source_commit" > dist/source-commit.txt
+          go version -m dist/usque > dist/build-info.txt
+          cp LICENSE.md dist/LICENSE.md
+          tar --sort=name --mtime="@$source_epoch" --owner=0 --group=0 --numeric-owner \
+            -C dist -czf dist/usque-linux-amd64.tar.gz \
+            usque source-commit.txt build-info.txt LICENSE.md
+          (cd dist && sha256sum usque-linux-amd64.tar.gz > usque-linux-amd64.tar.gz.sha256)
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: usque-linux-amd64-${{ github.sha }}
+          path: |
+            dist/usque-linux-amd64.tar.gz
+            dist/usque-linux-amd64.tar.gz.sha256
+            dist/source-commit.txt
+            dist/build-info.txt
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
