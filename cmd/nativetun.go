@@ -2,7 +2,10 @@ package cmd
 
 import (
 	"context"
+	"fmt"
 	"log"
+	"net"
+	"net/netip"
 	"time"
 
 	"github.com/Diniboy1123/usque/api"
@@ -94,7 +97,8 @@ var nativeTunCmd = &cobra.Command{
 			return
 		}
 
-		endpoint, err := config.SelectEndpointFromConfig(useHTTP2, useIPv6, connectPort)
+		literal, _ := cmd.Flags().GetString("endpoint")
+		endpoint, err := nativeEndpoint(useHTTP2, useIPv6, connectPort, literal)
 		if err != nil {
 			cmd.Printf("Failed to select endpoint: %v\n", err)
 			return
@@ -224,8 +228,25 @@ var nativeTunCmd = &cobra.Command{
 	},
 }
 
+// Overrides select a runtime address; they never change AppConfig or its pin.
+func nativeEndpoint(http2, ipv6 bool, port int, literal string) (net.Addr, error) {
+	if literal == "" {
+		return config.SelectEndpointFromConfig(http2, ipv6, port)
+	}
+	ip, err := netip.ParseAddr(literal)
+	if err != nil || ip.Zone() != "" || ip.Is4In6() || !ip.IsGlobalUnicast() || ip.Is6() != ipv6 || port < 1 || port > 65535 {
+		return nil, fmt.Errorf("--endpoint must be a literal unicast address matching --ipv6, with a port in 1..65535")
+	}
+	ap := netip.AddrPortFrom(ip, uint16(port))
+	if http2 {
+		return net.TCPAddrFromAddrPort(ap), nil
+	}
+	return net.UDPAddrFromAddrPort(ap), nil
+}
+
 func init() {
 	nativeTunCmd.Flags().IntP("connect-port", "P", 443, "Used port for MASQUE connection")
+	nativeTunCmd.Flags().String("endpoint", "", "Literal outer endpoint override; preserves the config and its public-key pin")
 	nativeTunCmd.Flags().BoolP("ipv6", "6", false, "Use IPv6 for MASQUE connection")
 	nativeTunCmd.Flags().BoolP("no-tunnel-ipv4", "F", false, "Disable IPv4 inside the MASQUE tunnel")
 	nativeTunCmd.Flags().BoolP("no-tunnel-ipv6", "S", false, "Disable IPv6 inside the MASQUE tunnel")

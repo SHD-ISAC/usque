@@ -58,8 +58,13 @@ jobs:
       - name: Test
         run: go test -timeout 5m ./...
 
-      - name: Race check endpoint probing
-        run: CGO_ENABLED=1 go test -race -timeout 5m ./scout ./cmd
+      - name: Race check endpoint probing and session controller
+        run: CGO_ENABLED=1 go test -race -timeout 5m ./scout ./cmd ./session
+
+      - name: Verify native and CN bypass routing in an isolated network namespace
+        run: |
+          go test -c ./session -o "$RUNNER_TEMP/usque-session.test"
+          sudo unshare --net env USQUE_NETNS_TEST=1 "$RUNNER_TEMP/usque-session.test" -test.run '^TestNamespaceRouting$' -test.v -test.timeout 90s
 
       - name: Vet
         run: go vet ./...
@@ -78,13 +83,17 @@ jobs:
           go build -trimpath -buildvcs=true -ldflags "$ldflags" -o dist/usque .
           ./dist/usque version
           ./dist/usque scout --help
+          ./dist/usque up --help
+          ./dist/usque down --help
+          ./dist/usque check --help
+          ./dist/usque cleanup-legacy --help
           printf '%s\n' "$source_commit" > dist/source-commit.txt
           go version -m dist/usque > dist/build-info.txt
           cp LICENSE.md dist/LICENSE.md
-          cp THIRD_PARTY_NOTICES.md SCOUT.md dist/
+          cp THIRD_PARTY_NOTICES.md SCOUT.md SESSION.md dist/
           tar --sort=name --mtime="@$source_epoch" --owner=0 --group=0 --numeric-owner \
             -C dist -czf dist/usque-linux-amd64.tar.gz \
-            usque source-commit.txt build-info.txt LICENSE.md THIRD_PARTY_NOTICES.md SCOUT.md
+            usque source-commit.txt build-info.txt LICENSE.md THIRD_PARTY_NOTICES.md SCOUT.md SESSION.md
           (cd dist && sha256sum usque-linux-amd64.tar.gz > usque-linux-amd64.tar.gz.sha256)
 
       - name: Upload build artifacts
