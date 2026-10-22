@@ -58,6 +58,9 @@ jobs:
       - name: Test
         run: go test -timeout 5m ./...
 
+      - name: Race check endpoint probing
+        run: CGO_ENABLED=1 go test -race -timeout 5m ./scout ./cmd
+
       - name: Vet
         run: go vet ./...
 
@@ -74,12 +77,14 @@ jobs:
           ldflags="-s -w -X github.com/Diniboy1123/usque/cmd.version=$version -X github.com/Diniboy1123/usque/cmd.commit=$source_commit -X github.com/Diniboy1123/usque/cmd.date=$build_date"
           go build -trimpath -buildvcs=true -ldflags "$ldflags" -o dist/usque .
           ./dist/usque version
+          ./dist/usque scout --help
           printf '%s\n' "$source_commit" > dist/source-commit.txt
           go version -m dist/usque > dist/build-info.txt
           cp LICENSE.md dist/LICENSE.md
+          cp THIRD_PARTY_NOTICES.md SCOUT.md dist/
           tar --sort=name --mtime="@$source_epoch" --owner=0 --group=0 --numeric-owner \
             -C dist -czf dist/usque-linux-amd64.tar.gz \
-            usque source-commit.txt build-info.txt LICENSE.md
+            usque source-commit.txt build-info.txt LICENSE.md THIRD_PARTY_NOTICES.md SCOUT.md
           (cd dist && sha256sum usque-linux-amd64.tar.gz > usque-linux-amd64.tar.gz.sha256)
 
       - name: Upload build artifacts

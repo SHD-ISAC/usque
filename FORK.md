@@ -16,6 +16,13 @@ these small diffs is not a full security audit of Usque or its dependencies.
 The API timeout affects registration and account/device requests, not the
 lifetime of the MASQUE tunnel.
 
+This fork also provides `usque scout`, adapting warpscout's MASQUE endpoint
+probing for an existing Team registration. It keeps the original peer pin and
+configuration, verifies traffic through each candidate tunnel, and optionally
+writes a separate selected config. See [SCOUT.md](SCOUT.md) for Fish commands,
+diagnostic results and limits, and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)
+for attribution and license.
+
 ## Build
 
 `.github/workflows/build-cachyos.yml` builds the selected `masque-hardening`
@@ -42,8 +49,8 @@ contents of `main`. Until then, use the push-triggered build.
 Download the `usque-linux-amd64-<commit>` artifact from a successful run. It
 contains the tarball, its SHA-256 checksum, `source-commit.txt`, and
 `build-info.txt`. Artifacts are retained for 14 days. The tarball also contains
-the source commit, Go build information, and license. The binary's `version`
-command includes the full commit; its build date is the source commit date.
+the source commit, Go build information, licenses and scout guide. The binary's
+`version` command includes the full commit; its build date is the source commit date.
 Compare the source commit with the commit shown on the workflow run.
 
 After extracting the artifact ZIP into a directory under `~/Downloads`, run
