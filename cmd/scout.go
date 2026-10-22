@@ -32,11 +32,12 @@ func newScoutCommand() *cobra.Command {
 	var sni, reportPath, copyPath string
 	var initialSize uint16
 	cmd := &cobra.Command{
-		Use:          "scout",
-		Short:        "Find usable MASQUE endpoints with an existing registration",
-		Long:         "warpscout-derived MASQUE probing for existing Usque Team or consumer registrations.\nAuthenticates with the original pinned endpoint key, then fetches Cloudflare metadata\nover the userspace tunnel. Does not register, change routes or overwrite configuration.\nDials endpoint IPs directly; environment proxies are ignored.",
-		Args:         cobra.NoArgs,
-		SilenceUsage: true,
+		Use:           "scout",
+		Short:         "Find usable MASQUE endpoints with an existing registration",
+		Long:          "warpscout-derived MASQUE probing for existing Usque Team or consumer registrations.\nAuthenticates with the original pinned endpoint key, then fetches Cloudflare metadata\nover the userspace tunnel. Does not register, change routes or overwrite configuration.\nDials endpoint IPs directly; environment proxies are ignored.",
+		Args:          cobra.NoArgs,
+		SilenceUsage:  true,
+		SilenceErrors: true, // main prints the returned error once
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := options.Validate(); err != nil {
 				return err
@@ -82,23 +83,21 @@ func newScoutCommand() *cobra.Command {
 			completed := 0
 			results, scanErr := scout.Scan(ctx, candidates, options, engine.Probe, func(r scout.Result) {
 				completed++
-				status := "ok"
-				if r.Successes == 0 && len(r.Attempts) > 0 {
-					status = r.Attempts[len(r.Attempts)-1].Status
+				status, stage, check, detail := scoutResultDetails(r)
+				fmt.Fprintf(cmd.ErrOrStderr(), "[%d/%d] %s %-5s %d/%d %s stage=%s check=%s\n", completed, len(candidates), r.Target.Endpoint, r.Target.Transport, r.Successes, len(r.Attempts), status, stage, check)
+				if detail != "" {
+					fmt.Fprintf(cmd.ErrOrStderr(), "  %s\n", detail)
 				}
-				fmt.Fprintf(cmd.ErrOrStderr(), "[%d/%d] %s %-5s %d/%d %s\n", completed, len(candidates), r.Target.Endpoint, r.Target.Transport, r.Successes, len(r.Attempts), status)
 			})
 			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 4, 2, ' ', 0)
-			fmt.Fprintln(w, "ENDPOINT\tTRANSPORT\tOK/TRIES\tMEDIAN ms\tCOUNTRY\tCOLO\tSTATUS")
+			fmt.Fprintln(w, "ENDPOINT\tTRANSPORT\tOK/TRIES\tMEDIAN ms\tCOUNTRY\tCOLO\tSTATUS\tSTAGE\tCHECK")
 			for _, r := range results {
-				country, colo, status := "-", "-", "ok"
+				country, colo := "-", "-"
 				if r.Location != nil {
 					country, colo = r.Location.Country, r.Location.Colo
 				}
-				if r.Successes == 0 && len(r.Attempts) > 0 {
-					status = r.Attempts[len(r.Attempts)-1].Status
-				}
-				fmt.Fprintf(w, "%s\t%s\t%d/%d\t%.1f\t%s\t%s\t%s\n", r.Target.Endpoint, r.Target.Transport, r.Successes, len(r.Attempts), r.MedianMS, country, colo, status)
+				status, stage, check, _ := scoutResultDetails(r)
+				fmt.Fprintf(w, "%s\t%s\t%d/%d\t%.1f\t%s\t%s\t%s\t%s\t%s\n", r.Target.Endpoint, r.Target.Transport, r.Successes, len(r.Attempts), r.MedianMS, country, colo, status, stage, check)
 			}
 			if err := w.Flush(); err != nil {
 				return err
@@ -141,7 +140,11 @@ func newScoutCommand() *cobra.Command {
 				if initialSize != 0 {
 					flags += fmt.Sprintf(" -i %d", initialSize)
 				}
-				fmt.Fprintf(cmd.OutOrStdout(), "New config copy (0600): %s\nTest with:\nenv -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy usque -c %s socks -b 127.0.0.1 -p 10810 -s %s -P %d%s --always-reconnect\n", copyPath, scoutShellQuote(copyPath), scoutShellQuote(name), best.Endpoint.Port(), flags)
+				dns := "1.1.1.1"
+				if cfg.IPv4 == "" {
+					dns = "2606:4700:4700::1111"
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "New config copy (0600): %s\nTest with:\nenv -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy usque -c %s socks -b 127.0.0.1 -p 10810 -s %s -P %d%s --dns %s --always-reconnect\n", copyPath, scoutShellQuote(copyPath), scoutShellQuote(name), best.Endpoint.Port(), flags, dns)
 			} else {
 				fmt.Fprintln(cmd.OutOrStdout(), "To save a candidate, run scout with --write-config NEWFILE. The original config is never overwritten.")
 			}
@@ -162,6 +165,24 @@ func newScoutCommand() *cobra.Command {
 	f.StringVar(&reportPath, "output-report", "", "Write a new JSON report (0600); existing files are refused")
 	f.StringVar(&copyPath, "write-config", "", "Write a separate config for the best verified endpoint (0600); existing files are refused")
 	return cmd
+}
+
+func scoutResultDetails(r scout.Result) (status, stage, check, detail string) {
+	if r.Successes > 0 {
+		check = "meta"
+		if r.Location != nil {
+			if strings.HasSuffix(r.Location.Source, "/cdn-cgi/trace") {
+				check = "trace"
+			}
+			detail = r.Location.MetadataError
+		}
+		return "ok", "probe", check, detail
+	}
+	if len(r.Attempts) == 0 {
+		return "cancelled", "-", "-", ""
+	}
+	a := r.Attempts[len(r.Attempts)-1]
+	return a.Status, a.Stage, "-", a.Error
 }
 
 // Restore default signal handling as soon as cancellation starts. A second

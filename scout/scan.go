@@ -18,19 +18,23 @@ var ErrProbeStalled = errors.New("probe did not stop within 1s after cancellatio
 const probeCleanupGrace = time.Second
 
 type Measurement struct {
-	Country   string  `json:"country"`
-	Colo      string  `json:"colo"`
-	ColoCity  string  `json:"colo_city,omitempty"`
-	ConnectMS float64 `json:"connect_ms"`
-	HTTPSMS   float64 `json:"https_ms"`
-	TotalMS   float64 `json:"total_ms"`
+	Country       string  `json:"country"`
+	Colo          string  `json:"colo"`
+	ColoCity      string  `json:"colo_city,omitempty"`
+	ConnectMS     float64 `json:"connect_ms"`
+	HTTPSMS       float64 `json:"https_ms"`
+	TotalMS       float64 `json:"total_ms"`
+	Source        string  `json:"source,omitempty"`
+	MetadataError string  `json:"metadata_error,omitempty"`
+	Warp          string  `json:"warp,omitempty"`
 }
 
 type Attempt struct {
-	Status      string       `json:"status"`
-	Stage       string       `json:"stage,omitempty"`
-	Error       string       `json:"error,omitempty"`
-	Measurement *Measurement `json:"measurement,omitempty"`
+	Status            string       `json:"status"`
+	Stage             string       `json:"stage,omitempty"`
+	Error             string       `json:"error,omitempty"`
+	Measurement       *Measurement `json:"measurement,omitempty"`
+	TunnelEstablished bool         `json:"tunnel_established,omitempty"`
 }
 
 type Result struct {
@@ -77,8 +81,10 @@ func failedAttempt(ctx context.Context, err error) Attempt {
 	if errors.As(err, &stage) {
 		a.Stage = stage.stage
 		a.Status = stage.stage + "-error"
+		a.TunnelEstablished = stage.stage == "probe"
 	}
 	var ne net.Error
+	var httpErr *probeHTTPError
 	switch {
 	case errors.Is(err, ErrProbeStalled):
 		a.Status, a.Stage = "cleanup-timeout", "cleanup"
@@ -90,7 +96,7 @@ func failedAttempt(ctx context.Context, err error) Attempt {
 		a.Status = "cancelled"
 	case errors.As(err, &ne) && ne.Timeout():
 		a.Status = "timeout"
-	case strings.Contains(err.Error(), "server responded with"):
+	case errors.As(err, &httpErr), a.Stage == "connect" && strings.Contains(err.Error(), "server responded with"):
 		a.Status = "http-error"
 	case strings.Contains(err.Error(), "access denied"):
 		a.Status = "auth-error"
@@ -164,7 +170,7 @@ func Scan(ctx context.Context, targets []Target, o Options, probe ProbeFunc, pro
 					if err != nil {
 						r.Attempts = append(r.Attempts, failedAttempt(attemptCtx, err))
 					} else {
-						r.Attempts = append(r.Attempts, Attempt{Status: "ok", Measurement: &m})
+						r.Attempts = append(r.Attempts, Attempt{Status: "ok", Measurement: &m, TunnelEstablished: true})
 						r.Successes++
 						latencies = append(latencies, m.TotalMS)
 						if r.Location == nil || m.TotalMS < r.Location.TotalMS {

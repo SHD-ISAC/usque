@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Diniboy1123/usque/scout"
 	"github.com/spf13/cobra"
 )
 
@@ -55,5 +56,22 @@ func TestScoutHelpExplainsReadOnlyDefaults(t *testing.T) {
 func TestScoutFishQuoting(t *testing.T) {
 	if got := scoutShellQuote("/tmp/Freeman's\\config.json"); got != "'/tmp/Freeman\\'s\\\\config.json'" {
 		t.Fatal(got)
+	}
+}
+
+func TestScoutDisplaysFailureStageAndTraceFallback(t *testing.T) {
+	r := scout.Result{Attempts: []scout.Attempt{{Status: "http-error", Stage: "probe", Error: "metadata server responded with 403"}}}
+	status, stage, _, detail := scoutResultDetails(r)
+	if status != "http-error" || stage != "probe" || detail != "metadata server responded with 403" {
+		t.Fatalf("diagnostic hidden: %s %s %s", status, stage, detail)
+	}
+	r.Successes = 1
+	r.Location = &scout.Measurement{Source: "https://www.cloudflare.com/cdn-cgi/trace", MetadataError: "metadata server responded with 403"}
+	status, stage, check, detail := scoutResultDetails(r)
+	if status != "ok" || stage != "probe" || check != "trace" || detail == "" {
+		t.Fatal("fallback not shown")
+	}
+	if !newScoutCommand().SilenceErrors {
+		t.Fatal("Cobra will duplicate main's error")
 	}
 }

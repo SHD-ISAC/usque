@@ -24,8 +24,15 @@ This does not change the tunnel's inner IPv4/IPv6 support.
 
 Each attempt authenticates CONNECT-IP using the registered client key, then
 fetches `https://speed.cloudflare.com/meta` through an isolated userspace
-network stack. DNS also runs inside that tunnel. The HTTPS request uses normal
-certificate and hostname validation. A successful handshake by itself is never
+network stack. If that metadata request is denied (for example HTTP 403/429)
+or has an invalid response, it tries `https://www.cloudflare.com/cdn-cgi/trace`
+inside the same tunnel. This fallback requires a valid client IP, country,
+colo and `warp=on` or `warp=plus`; an arbitrary HTTP 200 is insufficient. Both
+requests share the attempt deadline. The original metadata error and the
+successful check's URL are retained in the report; the trace client IP is not.
+
+DNS also runs inside that tunnel. HTTPS uses normal certificate and hostname
+validation for both sites. A successful handshake by itself is never
 reported as a working endpoint. No elevated privileges, OS TUN, route changes,
 DNS changes, extra binaries or local Go installation are required.
 
@@ -65,6 +72,7 @@ The copy contains the same sensitive credentials as the original; keep it local.
 The command prints a Fish-compatible `socks` test command with the correct
 config copy, SNI, port, outer IP family and `--http2` if needed. **Use those
 flags**: the config format does not store the selected port, SNI or transport.
+The suggested proxy command also uses the same Cloudflare DNS as the probe.
 The scanner never starts a proxy or replaces the configuration automatically.
 
 ## Narrow a diagnostic scan
@@ -101,11 +109,11 @@ Usque's normal PMTU discovery. The suggested proxy command retains a custom `-i`
 
 | Result | Meaning |
 | --- | --- |
-| `ok` | Original pin accepted, CONNECT-IP established, tunneled HTTPS returned valid metadata |
+| `ok` | Original pin accepted, CONNECT-IP established, tunneled HTTPS returned valid metadata or a validated WARP trace |
 | `pin-mismatch` | Peer key differs from the configured original pin; no automatic trust change |
 | `timeout`, stage `connect` | Tunnel setup did not complete within the attempt deadline |
 | `timeout`, stage `probe` | CONNECT-IP completed but tunneled DNS/HTTPS did not finish |
-| `http-error` | CONNECT-IP or metadata endpoint returned an error status; JSON records the stage and error |
+| `http-error` | CONNECT-IP or the final HTTPS check returned an error status; terminal output and JSON show the stage and error |
 | `auth-error` | Peer rejected the TLS authentication |
 | `connect-error` / `probe-error` | Other setup or inner-network failure; consult the report |
 | `cleanup-timeout` | Probe failed to return within one second after cancellation; scan aborted with partial results |
@@ -113,6 +121,11 @@ Usque's normal PMTU discovery. The suggested proxy command retains a custom `-i`
 Rows are ranked by successful-attempt ratio, then **median end-to-end attempt
 time**. `MEDIAN ms` includes connection setup, DNS and HTTPS; it is not ICMP RTT.
 `COUNTRY` and `COLO` come from the fastest successful metadata response.
+`CHECK` identifies `meta` or `trace`. A successful trace fallback retains the
+primary metadata failure as a diagnostic; it is not counted as a failed tunnel.
+Each JSON attempt also records `tunnel_established`: true means the original
+pin check and CONNECT-IP succeeded, even if an inner HTTPS check was rejected.
+This separates a site/policy error from a failure to establish MASQUE.
 No host ping is used, avoiding false positives from router ping interception.
 
 All endpoint dials ignore environment proxies, so a local HTTP proxy cannot
@@ -120,8 +133,8 @@ silently replace the candidate IP. Router-level transparent proxying still
 affects the network path. Keep that in mind when comparing Wi-Fi and hotspots.
 
 The scanner cannot manufacture a valid peer pin, refresh Team enrollment, fix
-protocol incompatibility or prove an endpoint will stay stable. Metadata can
-also be blocked by Team Gateway policy. No working candidate produces an error
+protocol incompatibility or prove an endpoint will stay stable. Probe sites can
+also be blocked by Team Gateway policy. If neither HTTPS check succeeds, the scanner produces an error
 exit status, a report if requested, and **no config copy**. It does not trigger
 registration or contact a third-party API relay. A successful probe does not
 replace separate throughput, long-lived connection, inner IPv4/IPv6 and UDP tests.
