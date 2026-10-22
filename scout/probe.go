@@ -11,7 +11,6 @@ import (
 	"io"
 	"net/http"
 	"net/netip"
-	"sync"
 	"time"
 
 	"github.com/Diniboy1123/usque/api"
@@ -101,63 +100,18 @@ func (e *Engine) Probe(ctx context.Context, target Target) (Measurement, error) 
 	if err != nil {
 		return Measurement{}, &stageError{"probe", err}
 	}
-	pumpCtx, cancel := context.WithCancelCause(ctx)
-	var once sync.Once
-	closeAll := func() { once.Do(func() { s.Close(); _ = dev.Close() }) }
-	stop := context.AfterFunc(pumpCtx, closeAll)
-	var wg sync.WaitGroup
-	defer func() { cancel(context.Canceled); stop(); closeAll(); wg.Wait() }()
-	adapter := api.NewNetstackAdapter(dev)
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		buf := make([]byte, 65535)
-		for pumpCtx.Err() == nil {
-			n, err := adapter.ReadPacket(buf)
-			if err != nil {
-				cancel(fmt.Errorf("read userspace interface: %w", err))
-				return
-			}
-			if pumpCtx.Err() != nil {
-				return
-			}
-			icmp, err := s.packets.WritePacket(buf[:n])
-			if err != nil {
-				cancel(fmt.Errorf("write tunnel packet: %w", err))
-				return
-			}
-			if len(icmp) > 0 {
-				if err := adapter.WritePacket(icmp); err != nil {
-					cancel(err)
-					return
-				}
-			}
-		}
-	}()
-	go func() {
-		defer wg.Done()
-		buf := make([]byte, 65535)
-		for pumpCtx.Err() == nil {
-			n, err := s.packets.ReadPacket(buf, true)
-			if err != nil {
-				cancel(fmt.Errorf("read tunnel packet: %w", err))
-				return
-			}
-			if err := adapter.WritePacket(buf[:n]); err != nil {
-				cancel(err)
-				return
-			}
-		}
-	}()
+	bridge := startPacketBridge(ctx, s, api.NewNetstackAdapter(dev), dev.Close)
+	stop := context.AfterFunc(bridge.ctx, bridge.Close)
+	defer func() { stop(); bridge.Close() }()
 	// Both DNS and the HTTPS connection use the isolated userspace tunnel. No
 	// host resolver, native TUN, routing changes or environment proxy is used.
 	tr := &http.Transport{DialContext: tnet.DialContext, DisableKeepAlives: true}
 	defer tr.CloseIdleConnections()
 	client := &http.Client{Transport: tr, CheckRedirect: func(*http.Request, []*http.Request) error { return fmt.Errorf("metadata redirects are not accepted") }}
 	requestStart := time.Now()
-	m, err := fetchMeta(pumpCtx, client)
+	m, err := fetchMeta(bridge.ctx, client)
 	if err != nil {
-		if cause := context.Cause(pumpCtx); cause != nil {
+		if cause := context.Cause(bridge.ctx); cause != nil {
 			err = cause
 		}
 		return Measurement{}, &stageError{"probe", err}

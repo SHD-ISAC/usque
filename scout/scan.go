@@ -13,6 +13,10 @@ import (
 
 var ErrPinMismatch = errors.New("endpoint public key does not match the original configuration")
 
+var ErrProbeStalled = errors.New("probe did not stop within 1s after cancellation; scan aborted to avoid accumulating stuck probes")
+
+const probeCleanupGrace = time.Second
+
 type Measurement struct {
 	Country   string  `json:"country"`
 	Colo      string  `json:"colo"`
@@ -76,6 +80,8 @@ func failedAttempt(ctx context.Context, err error) Attempt {
 	}
 	var ne net.Error
 	switch {
+	case errors.Is(err, ErrProbeStalled):
+		a.Status, a.Stage = "cleanup-timeout", "cleanup"
 	case errors.Is(err, ErrPinMismatch):
 		a.Status = "pin-mismatch"
 	case errors.Is(ctx.Err(), context.DeadlineExceeded), errors.Is(err, context.DeadlineExceeded):
@@ -92,6 +98,32 @@ func failedAttempt(ctx context.Context, err error) Attempt {
 	return a
 }
 
+// A network-stack or transport cleanup bug must not defeat the command's
+// timeout. Give the probe a short cleanup grace, then abort the entire scan.
+// Never keep scheduling probes over blocked goroutines: process exit releases
+// any remaining resources, and at most one in-flight probe per worker exists.
+func runProbe(ctx context.Context, t Target, probe ProbeFunc) (Measurement, error) {
+	type reply struct {
+		m   Measurement
+		err error
+	}
+	done := make(chan reply, 1)
+	go func() { m, err := probe(ctx, t); done <- reply{m, err} }()
+	select {
+	case r := <-done:
+		return r.m, r.err
+	case <-ctx.Done():
+	}
+	timer := time.NewTimer(probeCleanupGrace)
+	defer timer.Stop()
+	select {
+	case r := <-done:
+		return r.m, r.err
+	case <-timer.C:
+		return Measurement{}, ErrProbeStalled
+	}
+}
+
 // Scan bounds concurrency and retries every candidate independently, as MASQUE
 // endpoints can fail intermittently. Ranking favours success rate, then median
 // end-to-end latency; a fast failed handshake never becomes a usable result.
@@ -105,6 +137,8 @@ func Scan(ctx context.Context, targets []Target, o Options, probe ProbeFunc, pro
 	if probe == nil {
 		return nil, fmt.Errorf("missing probe function")
 	}
+	scanCtx, stop := context.WithCancelCause(ctx)
+	defer stop(nil)
 	jobs := make(chan Target)
 	results := make(chan Result)
 	var wg sync.WaitGroup
@@ -113,17 +147,17 @@ func Scan(ctx context.Context, targets []Target, o Options, probe ProbeFunc, pro
 		go func() {
 			defer wg.Done()
 			for t := range jobs {
-				if ctx.Err() != nil {
+				if scanCtx.Err() != nil {
 					return
 				}
 				r := Result{Target: t}
 				var latencies []float64
 				for range o.Attempts {
-					if ctx.Err() != nil {
+					if scanCtx.Err() != nil {
 						break
 					}
-					attemptCtx, cancel := context.WithTimeout(ctx, o.Timeout)
-					m, err := probe(attemptCtx, t)
+					attemptCtx, cancel := context.WithTimeout(scanCtx, o.Timeout)
+					m, err := runProbe(attemptCtx, t, probe)
 					if err == nil && attemptCtx.Err() != nil {
 						err = attemptCtx.Err()
 					}
@@ -138,6 +172,10 @@ func Scan(ctx context.Context, targets []Target, o Options, probe ProbeFunc, pro
 						}
 					}
 					cancel()
+					if errors.Is(err, ErrProbeStalled) {
+						stop(ErrProbeStalled)
+						break
+					}
 				}
 				if len(latencies) > 0 {
 					slices.Sort(latencies)
@@ -156,7 +194,7 @@ func Scan(ctx context.Context, targets []Target, o Options, probe ProbeFunc, pro
 		for _, t := range targets {
 			select {
 			case jobs <- t:
-			case <-ctx.Done():
+			case <-scanCtx.Done():
 				return
 			}
 		}
@@ -189,5 +227,5 @@ func Scan(ctx context.Context, targets []Target, o Options, probe ProbeFunc, pro
 		}
 		return a.Target.Endpoint.Compare(b.Target.Endpoint)
 	})
-	return out, ctx.Err()
+	return out, context.Cause(scanCtx)
 }

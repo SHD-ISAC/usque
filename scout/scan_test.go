@@ -81,3 +81,44 @@ func TestProbeStageIsRetainedForTimeouts(t *testing.T) {
 		t.Fatal(a)
 	}
 }
+
+func TestScanAbortsInsteadOfAccumulatingStuckProbes(t *testing.T) {
+	release := make(chan struct{})
+	returned := make(chan struct{})
+	defer func() { close(release); <-returned }()
+	var calls atomic.Int32
+	probe := func(context.Context, Target) (Measurement, error) {
+		calls.Add(1)
+		<-release // deliberately ignores cancellation, modelling stuck cleanup
+		close(returned)
+		return Measurement{}, context.Canceled
+	}
+	results, err := Scan(context.Background(), make([]Target, 100), Options{Workers: 1, Attempts: 3, Timeout: time.Second}, probe, nil)
+	if !errors.Is(err, ErrProbeStalled) {
+		t.Fatalf("expected cleanup abort, got %v", err)
+	}
+	if calls.Load() != 1 || len(results) != 1 {
+		t.Fatalf("scan continued over stuck probe: calls=%d results=%d", calls.Load(), len(results))
+	}
+	if a := results[0].Attempts[0]; a.Status != "cleanup-timeout" || a.Stage != "cleanup" {
+		t.Fatal(a)
+	}
+}
+
+func TestScanCancellationReturnsEvenIfProbeIgnoresContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	release := make(chan struct{})
+	returned := make(chan struct{})
+	defer func() { close(release); <-returned }()
+	probe := func(context.Context, Target) (Measurement, error) {
+		cancel()
+		<-release
+		close(returned)
+		return Measurement{}, context.Canceled
+	}
+	_, err := Scan(ctx, make([]Target, 100), Options{Workers: 1, Attempts: 3, Timeout: time.Minute}, probe, nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("lost user cancellation: %v", err)
+	}
+}

@@ -60,8 +60,8 @@ func dialSession(ctx context.Context, target Target, baseTLS *tls.Config, initia
 	if deadline, ok := ctx.Deadline(); ok {
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
-			_ = qtr.Close()
 			_ = udp.Close()
+			_ = qtr.Close()
 			return nil, context.DeadlineExceeded
 		}
 		qcfg.HandshakeIdleTimeout = remaining
@@ -69,8 +69,8 @@ func dialSession(ctx context.Context, target Target, baseTLS *tls.Config, initia
 	}
 	conn, err := qtr.Dial(ctx, remote, baseTLS.Clone(), qcfg)
 	if err != nil {
-		_ = qtr.Close()
 		_ = udp.Close()
+		_ = qtr.Close()
 		return nil, err
 	}
 	tr := &http3.Transport{
@@ -81,10 +81,12 @@ func dialSession(ctx context.Context, target Target, baseTLS *tls.Config, initia
 	var closeOnce sync.Once
 	closeTransport := func() {
 		closeOnce.Do(func() {
+			// This socket belongs to the probe. Closing it first releases UDP
+			// I/O before QUIC teardown waits for its connection goroutines.
+			_ = udp.Close()
 			_ = conn.CloseWithError(0, "scout probe ended")
 			_ = tr.Close()
 			_ = qtr.Close()
-			_ = udp.Close()
 		})
 	}
 	stop := context.AfterFunc(ctx, closeTransport)

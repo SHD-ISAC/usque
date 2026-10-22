@@ -1,11 +1,13 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/signal"
 	"strings"
+	"syscall"
 	"text/tabwriter"
 	"time"
 
@@ -74,7 +76,7 @@ func newScoutCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt)
+			ctx, stop := scoutSignalContext(cmd.Context())
 			defer stop()
 			fmt.Fprintf(cmd.ErrOrStderr(), "Probing %d targets; profile=%s, SNI=%s, attempts=%d, workers=%d, timeout=%s per full attempt\nOriginal public-key pin enforced. Direct endpoint dialing; no API registration or relay.\n", len(candidates), targets.Profile, name, options.Attempts, options.Workers, options.Timeout)
 			completed := 0
@@ -160,6 +162,14 @@ func newScoutCommand() *cobra.Command {
 	f.StringVar(&reportPath, "output-report", "", "Write a new JSON report (0600); existing files are refused")
 	f.StringVar(&copyPath, "write-config", "", "Write a separate config for the best verified endpoint (0600); existing files are refused")
 	return cmd
+}
+
+// Restore default signal handling as soon as cancellation starts. A second
+// interrupt can still terminate the process if a library gets stuck in cleanup.
+func scoutSignalContext(parent context.Context) (context.Context, context.CancelFunc) {
+	ctx, stop := signal.NotifyContext(parent, os.Interrupt, syscall.SIGTERM)
+	go func() { <-ctx.Done(); stop() }()
+	return ctx, stop
 }
 
 // Single quotes and backslashes are escaped for Fish. No

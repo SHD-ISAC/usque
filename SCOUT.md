@@ -31,7 +31,14 @@ DNS changes, extra binaries or local Go installation are required.
 
 The default scan can take several minutes when all candidates time out.
 Each completed target prints progress. Ctrl+C cancels active connections and
-stops scheduling new targets.
+stops scheduling new targets. SIGTERM also requests cancellation; signal
+handling is reset immediately so a second signal can terminate a stuck process.
+
+Cancellation has a one-second cleanup grace after the per-attempt timeout.
+If a probe still fails to return, the scanner records `cleanup-timeout`, stops
+scheduling work and aborts the scan, keeping partial results in a requested
+report. It does not keep launching probes over stuck cleanup tasks. This is a
+scanner failure, rather than evidence that an endpoint rejected authentication.
 
 ## Save a report and a separate selected config
 
@@ -101,6 +108,7 @@ Usque's normal PMTU discovery. The suggested proxy command retains a custom `-i`
 | `http-error` | CONNECT-IP or metadata endpoint returned an error status; JSON records the stage and error |
 | `auth-error` | Peer rejected the TLS authentication |
 | `connect-error` / `probe-error` | Other setup or inner-network failure; consult the report |
+| `cleanup-timeout` | Probe failed to return within one second after cancellation; scan aborted with partial results |
 
 Rows are ranked by successful-attempt ratio, then **median end-to-end attempt
 time**. `MEDIAN ms` includes connection setup, DNS and HTTPS; it is not ICMP RTT.
