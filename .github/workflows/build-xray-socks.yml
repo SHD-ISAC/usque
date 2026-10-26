@@ -1,5 +1,5 @@
 name: Build isolated Xray-Usque SOCKS fix
-run-name: Xray SOCKS lifecycle - ${{ github.sha }}
+run-name: Xray SOCKS lifecycle and netstack feedback - ${{ github.sha }}
 on:
   push:
     branches: [xray-usque-udp-fix]
@@ -28,6 +28,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
+          fetch-depth: 2
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
         with:
           go-version-file: go.mod
@@ -36,10 +37,26 @@ jobs:
         run: |
           go mod download
           go mod verify
+      - name: Reproduce feedback deadlock in the previous adapter
+        run: |
+          saved="$RUNNER_TEMP/tunnel-fixed.go"
+          log="$RUNNER_TEMP/adapter-before-fix.log"
+          cp api/tunnel.go "$saved"
+          trap 'cp "$saved" api/tunnel.go' EXIT
+          git show 89cf330f92e36504eeaa92f0e1014ad4af024c8e:api/tunnel.go > api/tunnel.go
+          if go test -timeout 20s ./api -run '^TestNetstackAdapterDrainsDuringFeedback$' -count=1 > "$log" 2>&1; then
+            cat "$log"
+            echo "Expected the old adapter to block, but the regression passed."
+            exit 1
+          fi
+          cat "$log"
+          grep -F 'feedback injection blocked without an independent device reader' "$log"
       - name: Test all packages
         run: go test -timeout 5m ./...
       - name: Repeat UDP lifecycle tests under race detector
         run: CGO_ENABLED=1 go test -race -count=10 -timeout 5m ./internal -run '^TestSOCKSUDP'
+      - name: Repeat netstack adapter tests under race detector
+        run: CGO_ENABLED=1 go test -race -count=10 -timeout 5m ./api -run '^TestNetstackAdapter'
       - name: Vet
         run: go vet ./...
       - name: Build isolated binary
@@ -49,9 +66,12 @@ jobs:
           mkdir -p "$dist"
           gofmt internal/socks5.go > "$dist/socks5.go"
           gofmt internal/socks5_lifecycle_test.go > "$dist/socks5_lifecycle_test.go"
+          gofmt api/tunnel.go > "$dist/tunnel.go"
+          gofmt api/netstack_adapter_test.go > "$dist/netstack_adapter_test.go"
+          cp "$RUNNER_TEMP/adapter-before-fix.log" "$dist/"
           source_epoch=$(git show -s --format=%ct HEAD)
           build_date=$(date -u -d "@$source_epoch" '+%Y-%m-%dT%H:%M:%SZ')
-          version="v4.2.1-xray-usque-udpfix+${GITHUB_SHA:0:12}"
+          version="v4.2.1-xray-usque-netstackfix+${GITHUB_SHA:0:12}"
           go build -trimpath -buildvcs=true -ldflags "-s -w -X github.com/Diniboy1123/usque/cmd.version=$version -X github.com/Diniboy1123/usque/cmd.commit=$GITHUB_SHA -X github.com/Diniboy1123/usque/cmd.date=$build_date" -o "$dist/usque" .
           "$dist/usque" version
           "$dist/usque" socks --help
@@ -59,7 +79,7 @@ jobs:
           go version -m "$dist/usque" > "$dist/build-info.txt"
           grep -F 'vcs.modified=false' "$dist/build-info.txt"
           cp LICENSE.md THIRD_PARTY_NOTICES.md "$dist/"
-          (cd "$dist" && sha256sum usque socks5.go socks5_lifecycle_test.go > SHA256SUMS)
+          (cd "$dist" && sha256sum usque socks5.go socks5_lifecycle_test.go tunnel.go netstack_adapter_test.go adapter-before-fix.log > SHA256SUMS)
           cat "$dist/SHA256SUMS"
           git diff --exit-code -- go.mod go.sum
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -68,3 +88,4 @@ jobs:
           path: ${{ runner.temp }}/usque-dist/
           retention-days: 14
           if-no-files-found: error
+

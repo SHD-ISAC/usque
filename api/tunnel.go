@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"sync"
@@ -68,30 +69,80 @@ type TunnelDevice interface {
 
 // NetstackAdapter wraps a tun.Device (e.g. from netstack) to satisfy TunnelDevice.
 type NetstackAdapter struct {
-	dev             tun.Device
-	tunnelBufPool   sync.Pool
-	tunnelSizesPool sync.Pool
+	dev           tun.Device
+	tunnelBufPool sync.Pool
+	readOnce      sync.Once
+	readPackets   chan []byte
+	readBufPool   *NetBuffer
+	readErr       error
+}
+
+// A netstack Write may synchronously emit a TCP ACK or a retransmission through
+// its unbuffered device output. Keep a reader alive even while the forwarding
+// pump injects ICMP Packet Too Big feedback. Otherwise that pump waits for a
+// device read that only the same pump can perform. A bounded, lossy packet queue
+// keeps this drain independent of a stalled tunnel or an absent consumer.
+const netstackReadQueueSize = 64
+
+func (n *NetstackAdapter) startReader() {
+	n.readPackets = make(chan []byte, netstackReadQueueSize)
+	mtu, err := n.dev.MTU()
+	if err != nil || mtu <= 0 || mtu > 65535 {
+		if err == nil {
+			err = fmt.Errorf("invalid netstack MTU: %d", mtu)
+		}
+		n.readErr = err
+		close(n.readPackets)
+		return
+	}
+	n.readBufPool = NewNetBuffer(mtu)
+	go n.drainDevice()
+}
+
+func (n *NetstackAdapter) drainDevice() {
+	defer close(n.readPackets)
+	bufs, sizes := make([][]byte, 1), make([]int, 1)
+	for {
+		buf := n.readBufPool.Get()
+		buf = buf[:cap(buf)]
+		bufs[0], sizes[0] = buf, 0
+		count, err := n.dev.Read(bufs, sizes, 0)
+		bufs[0] = nil
+		if err != nil {
+			n.readBufPool.Put(buf)
+			n.readErr = err
+			return
+		}
+		if count == 0 || sizes[0] == 0 {
+			n.readBufPool.Put(buf)
+			continue
+		}
+		if count != 1 || sizes[0] < 0 || sizes[0] > len(buf) {
+			n.readBufPool.Put(buf)
+			n.readErr = fmt.Errorf("invalid netstack read: packets=%d size=%d", count, sizes[0])
+			return
+		}
+		select {
+		case n.readPackets <- buf[:sizes[0]]:
+		default:
+			// Never park a netstack writer behind tunnel backpressure. Like a
+			// full network queue, this drops a packet instead of deadlocking.
+			n.readBufPool.Put(buf)
+		}
+	}
 }
 
 func (n *NetstackAdapter) ReadPacket(buf []byte) (int, error) {
-	packetBufsPtr := n.tunnelBufPool.Get().(*[][]byte)
-	sizesPtr := n.tunnelSizesPool.Get().(*[]int)
-
-	defer func() {
-		(*packetBufsPtr)[0] = nil
-		n.tunnelBufPool.Put(packetBufsPtr)
-		n.tunnelSizesPool.Put(sizesPtr)
-	}()
-
-	(*packetBufsPtr)[0] = buf
-	(*sizesPtr)[0] = 0
-
-	_, err := n.dev.Read(*packetBufsPtr, *sizesPtr, 0)
-	if err != nil {
-		return 0, err
+	n.readOnce.Do(n.startReader)
+	packet, ok := <-n.readPackets
+	if !ok {
+		return 0, n.readErr
 	}
-
-	return (*sizesPtr)[0], nil
+	defer n.readBufPool.Put(packet[:cap(packet)])
+	if len(packet) > len(buf) {
+		return 0, io.ErrShortBuffer
+	}
+	return copy(buf, packet), nil
 }
 
 func (n *NetstackAdapter) WritePacket(pkt []byte) error {
@@ -114,12 +165,6 @@ func NewNetstackAdapter(dev tun.Device) TunnelDevice {
 			New: func() interface{} {
 				buf := make([][]byte, 1)
 				return &buf
-			},
-		},
-		tunnelSizesPool: sync.Pool{
-			New: func() interface{} {
-				sizes := make([]int, 1)
-				return &sizes
 			},
 		},
 	}
@@ -231,6 +276,9 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 	}
 
 	packetBufferPool := NewNetBuffer(cfg.MTU + datagramContextIDHeadroom)
+	// Reconnect cycles share the device: a canceled reader may still be
+	// parked until the next outbound packet arrives.
+	var readMu sync.Mutex
 
 	for {
 		if ctx.Err() != nil {
@@ -305,7 +353,6 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 		errChan := make(chan error, 2)
 		pumpCtx, cancelPumps := context.WithCancel(ctx)
 		var wg sync.WaitGroup
-		var readMu sync.Mutex
 
 		wg.Add(2)
 
@@ -410,3 +457,4 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 		}
 	}
 }
+
