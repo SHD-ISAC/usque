@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"log"
 	"net"
@@ -34,6 +35,37 @@ type SOCKS5Config struct {
 type SOCKS5Server struct {
 	cfg    SOCKS5Config
 	server *socks5.Server
+	// Serialize creation/retirement for one UDP source without a global dial
+	// lock. A striped lock also bounds memory under untrusted source churn.
+	udpSources [64]sync.Mutex
+}
+
+func (s *SOCKS5Server) udpSourceLock(src string) *sync.Mutex {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(src))
+	return &s.udpSources[h.Sum32()%uint32(len(s.udpSources))]
+}
+
+// Closing the control TCP connection must wake silent UDP readers immediately,
+// including when UDPTimeout is zero. Checking ch only before Read cannot do so.
+func (s *SOCKS5Server) closeUDPAssociation(srv *socks5.Server, src string, ch chan byte) {
+	lock := s.udpSourceLock(src)
+	lock.Lock()
+	var closing []net.Conn
+	if current, ok := srv.AssociatedUDP.Get(src); ok && current == ch {
+		srv.AssociatedUDP.Delete(src)
+		for key, item := range srv.UDPExchanges.Items() {
+			if ue, ok := item.Object.(*socks5.UDPExchange); ok && ue.ClientAddr.String() == src {
+				srv.UDPExchanges.Delete(key)
+				closing = append(closing, ue.RemoteConn)
+			}
+		}
+	}
+	close(ch)
+	lock.Unlock()
+	for _, conn := range closing {
+		_ = conn.Close()
+	}
 }
 
 func NewSOCKS5Server(cfg SOCKS5Config) (*SOCKS5Server, error) {
@@ -313,9 +345,16 @@ func (s *SOCKS5Server) TCPHandle(srv *socks5.Server, c *net.TCPConn, r *socks5.R
 			return err
 		}
 		ch := make(chan byte)
-		defer close(ch)
-		srv.AssociatedUDP.Set(caddr.String(), ch, -1)
-		defer srv.AssociatedUDP.Delete(caddr.String())
+		src := caddr.String()
+		lock := s.udpSourceLock(src)
+		lock.Lock()
+		if _, exists := srv.AssociatedUDP.Get(src); exists {
+			lock.Unlock()
+			return fmt.Errorf("UDP source %s already has a control association", src)
+		}
+		srv.AssociatedUDP.Set(src, ch, -1)
+		lock.Unlock()
+		defer s.closeUDPAssociation(srv, src, ch)
 		_, _ = io.Copy(io.Discard, c)
 		return nil
 	}
@@ -363,6 +402,12 @@ func (s *SOCKS5Server) relayTCP(a, b net.Conn, timeout time.Duration) {
 // UDPHandle is like txthinking DefaultHandle.UDPHandle but does not use srv.UDPSrc.
 func (s *SOCKS5Server) UDPHandle(srv *socks5.Server, addr *net.UDPAddr, d *socks5.Datagram) error {
 	src := addr.String()
+	// The UDP listener starts one goroutine per datagram. Without serialization,
+	// several Initial packets can all miss the cache, allocate duplicate relays,
+	// overwrite each other and consume the bounded relay slots until timeout.
+	lock := s.udpSourceLock(src)
+	lock.Lock()
+	defer lock.Unlock()
 	var ch chan byte
 	if srv.LimitUDP {
 		any, ok := srv.AssociatedUDP.Get(src)
@@ -410,8 +455,14 @@ func (s *SOCKS5Server) UDPHandle(srv *socks5.Server, addr *net.UDPAddr, d *socks
 
 	go func(ue *socks5.UDPExchange, dst string) {
 		defer func() {
+			lock := s.udpSourceLock(ue.ClientAddr.String())
+			lock.Lock()
+			key := ue.ClientAddr.String() + dst
+			if current, ok := srv.UDPExchanges.Get(key); ok && current == ue {
+				srv.UDPExchanges.Delete(key)
+			}
+			lock.Unlock()
 			_ = ue.RemoteConn.Close()
-			srv.UDPExchanges.Delete(ue.ClientAddr.String() + dst)
 			<-udpRelaySem
 		}()
 		// A stack [65507]byte here escapes to the heap per goroutine (~64 KiB each);
