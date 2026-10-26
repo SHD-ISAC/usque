@@ -44,24 +44,27 @@ jobs:
         run: go vet ./...
       - name: Build isolated binary
         run: |
-          mkdir -p dist
-          gofmt internal/socks5.go > dist/socks5.go
-          gofmt internal/socks5_lifecycle_test.go > dist/socks5_lifecycle_test.go
+          test -z "$(git status --porcelain --untracked-files=all)"
+          dist="$RUNNER_TEMP/usque-dist"
+          mkdir -p "$dist"
+          gofmt internal/socks5.go > "$dist/socks5.go"
+          gofmt internal/socks5_lifecycle_test.go > "$dist/socks5_lifecycle_test.go"
           source_epoch=$(git show -s --format=%ct HEAD)
           build_date=$(date -u -d "@$source_epoch" '+%Y-%m-%dT%H:%M:%SZ')
           version="v4.2.1-xray-usque-udpfix+${GITHUB_SHA:0:12}"
-          go build -trimpath -buildvcs=true -ldflags "-s -w -X github.com/Diniboy1123/usque/cmd.version=$version -X github.com/Diniboy1123/usque/cmd.commit=$GITHUB_SHA -X github.com/Diniboy1123/usque/cmd.date=$build_date" -o dist/usque .
-          ./dist/usque version
-          ./dist/usque socks --help
-          printf '%s\n' "$GITHUB_SHA" > dist/source-commit.txt
-          go version -m dist/usque > dist/build-info.txt
-          cp LICENSE.md THIRD_PARTY_NOTICES.md dist/
-          (cd dist && sha256sum usque socks5.go socks5_lifecycle_test.go > SHA256SUMS)
-          cat dist/SHA256SUMS
+          go build -trimpath -buildvcs=true -ldflags "-s -w -X github.com/Diniboy1123/usque/cmd.version=$version -X github.com/Diniboy1123/usque/cmd.commit=$GITHUB_SHA -X github.com/Diniboy1123/usque/cmd.date=$build_date" -o "$dist/usque" .
+          "$dist/usque" version
+          "$dist/usque" socks --help
+          printf '%s\n' "$GITHUB_SHA" > "$dist/source-commit.txt"
+          go version -m "$dist/usque" > "$dist/build-info.txt"
+          grep -F 'vcs.modified=false' "$dist/build-info.txt"
+          cp LICENSE.md THIRD_PARTY_NOTICES.md "$dist/"
+          (cd "$dist" && sha256sum usque socks5.go socks5_lifecycle_test.go > SHA256SUMS)
+          cat "$dist/SHA256SUMS"
           git diff --exit-code -- go.mod go.sum
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: usque-xray-udpfix-linux-amd64-${{ github.sha }}
-          path: dist/
+          path: ${{ runner.temp }}/usque-dist/
           retention-days: 14
           if-no-files-found: error
